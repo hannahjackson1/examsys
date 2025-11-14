@@ -15,13 +15,13 @@ USERNAME_SEL        = "input[id^='username']"
 
 pw = browser = ctx = page = None
 
-# --- inject some simple UoN-ish styling ---
+# --- UoN Branding CSS ---------------------------------------------------
 ui.html('''
 <style>
   .uon-header {
     background: #001E43;
     color: white;
-    padding: 0.9rem 1.5rem;
+    padding: 1rem 1.5rem;
     font-size: 1.4rem;
     font-weight: 600;
     font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -29,19 +29,32 @@ ui.html('''
     align-items: center;
     justify-content: space-between;
   }
-  .uon-header span.left {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.5rem;
+  .uon-header span.left { display:flex;align-items:center;gap:0.5rem; }
+  .uon-header span.right { font-size:0.8rem;opacity:0.8; }
+
+  /* simple "table-like" summary layout */
+  .summary-row {
+      display:flex;
+      justify-content:space-between;
+      padding:4px 0;
+      border-bottom:1px solid #e5e7eb;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   }
-  .uon-header span.right {
-    font-size: 0.8rem;
-    opacity: 0.8;
+  .summary-row-label {
+      font-weight:500;
+      color:#001E43;
+  }
+  .summary-row-value {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      color:#111827;
   }
 </style>
 ''', sanitize=False)
 
 
+# ---------------------------------------------------------------------
+# UTILITY FUNCTION -----------------------------------------------------
+# ---------------------------------------------------------------------
 def absolutize(href: str, base: str = EXAMSYS_BASE) -> str:
     if not href:
         return ""
@@ -60,7 +73,7 @@ def absolutize(href: str, base: str = EXAMSYS_BASE) -> str:
 
 
 # ---------------------------------------------------------------------
-# EXTRACTION LOGIC
+# EXTRACTION LOGIC -----------------------------------------------------
 # ---------------------------------------------------------------------
 async def extract_feedback(report_url: str, output_path: str, log_box):
     global page
@@ -94,17 +107,19 @@ async def extract_feedback(report_url: str, output_path: str, log_box):
     # CSV setup
     with open(output_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["question_number",
-                         "student_id",
-                         "student_label",
-                         "mark",
-                         "comment",
-                         "student_answer"])
+        writer.writerow([
+            "question_number",
+            "student_id",
+            "student_label",
+            "mark",
+            "comment",
+            "student_answer",
+        ])
 
         for qi, qurl in enumerate(question_urls, 1):
             log_box.value += f"\n➡️ Processing Question {qi}/{total_qs}\n"
 
-            # Update progress info
+            # Update progress info in localStorage and in the orange box
             await page.evaluate(f"""
                 localStorage.setItem('currentQ', {qi});
                 const total  = parseInt(localStorage.getItem('totalQs') || '{total_qs}', 10);
@@ -156,7 +171,7 @@ async def extract_feedback(report_url: str, output_path: str, log_box):
                     f"| ans={len(ans)} chars | comm={len(com)} chars\n"
                 )
 
-            # Back to report page for next question
+            # Go back to report page for next question
             await page.goto(report_url, wait_until="domcontentloaded")
             await asyncio.sleep(0.25)
 
@@ -172,7 +187,7 @@ async def extract_feedback(report_url: str, output_path: str, log_box):
     """)
 
     elapsed = time.perf_counter() - start_time
-    log_box.value += f"\n🎉 Done → {output_path}\n"
+    log_box.value += f"\n🎉 Done → {output_path} (in {elapsed:.1f}s)\n"
 
     ui.notify(f"✅ CSV saved: {os.path.basename(output_path)}", type="positive")
     ui.download(
@@ -181,7 +196,7 @@ async def extract_feedback(report_url: str, output_path: str, log_box):
         filename=os.path.basename(output_path),
     ).classes("bg-green-600 text-white mt-2 px-3 py-1 rounded")
 
-    # Return a summary dict for the UI
+    # Summary for UI
     return {
         "total_questions": total_qs,
         "total_students": total_students,
@@ -192,7 +207,7 @@ async def extract_feedback(report_url: str, output_path: str, log_box):
 
 
 # ---------------------------------------------------------------------
-# LOGIN + NAVIGATION FLOW
+# LOGIN + NAVIGATION FLOW ----------------------------------------------
 # ---------------------------------------------------------------------
 async def choose_and_extract(log_box, output_input, summary_card, summary_labels):
     global pw, browser, ctx, page
@@ -203,7 +218,7 @@ async def choose_and_extract(log_box, output_input, summary_card, summary_labels
     ctx = await browser.new_context()
     page = await ctx.new_page()
 
-    # Persistent "This is my exam" button + progress bar
+    # Persistent "This is my exam" button + progress bar (KNOWN-WORKING VERSION)
     await ctx.add_init_script("""
         (function(){
             function ensureProgressBox() {
@@ -358,7 +373,7 @@ async def choose_and_extract(log_box, output_input, summary_card, summary_labels
 
 
 # ---------------------------------------------------------------------
-# GUI
+# GUI -----------------------------------------------------------------
 # ---------------------------------------------------------------------
 
 # Header with title + credit
@@ -370,22 +385,22 @@ ui.html(
     sanitize=False,
 )
 
+# Step 1: Output filename
 with ui.card().classes("w-full mt-4 p-4"):
-    ui.label("Choose a name for your output CSV file") \
-       .classes("text-lg font-semibold mb-2")
+    ui.label("Step 1: Choose Output Filename").classes("text-lg font-semibold mb-2")
     output_in = ui.input(value=DEFAULT_OUTPUT) \
                   .props('outlined dense clearable') \
-                  .classes("w-full text-base p-2")
+                  .classes("w-full")
 
-# Summary card (initially hidden)
+# Summary card (table-like, initially hidden)
 with ui.card().classes("w-full mt-4 p-4 hidden") as summary_card:
     ui.label("Extraction Summary").classes("text-lg font-semibold mb-3")
     summary_labels = {}
 
     def add_summary_row(label_text, key):
-        with ui.row().classes("w-full justify-between mb-1"):
-            ui.label(label_text).classes("font-medium text-slate-700")
-            summary_labels[key] = ui.label("–").classes("font-mono text-slate-900")
+        with ui.row().classes("summary-row"):
+            ui.label(label_text).classes("summary-row-label")
+            summary_labels[key] = ui.label("–").classes("summary-row-value")
 
     add_summary_row("Total questions detected", "questions")
     add_summary_row("Total students detected", "students")
@@ -393,11 +408,11 @@ with ui.card().classes("w-full mt-4 p-4 hidden") as summary_card:
     add_summary_row("Output file", "file")
     add_summary_row("Duration", "duration")
 
-# Extraction controls
+# Step 2: Login + extract controls
 with ui.card().classes("w-full mt-4 p-4"):
     ui.label("Step 2: Log in and extract").classes("text-lg font-semibold mb-2")
     ui.label(
-        "Click the button below, log into ExamSys in the popup window, "
+        "Click below, log into ExamSys in the popup window, "
         "navigate to the correct exam, then press ‘✅ This is my exam’."
     ).classes("text-sm text-gray-700 mb-3")
 
@@ -413,19 +428,16 @@ with ui.card().classes("w-full mt-4 p-4"):
         asyncio.create_task(choose_and_extract(log, output_in, summary_card, summary_labels))
 
     ui.button(
-        "Login → Choose Exam → Extract",
+        "LOGIN → CHOOSE EXAM → EXTRACT",
         on_click=start,
     ).classes("mt-1 mb-3 bg-[#0095C8] text-white text-lg px-6 py-2 rounded")
 
-# *** FULL-WIDTH EXTRACTION LOG ***
+# Full-width Extraction Log (collapsible)
 with ui.expansion('Extraction Log', icon='article', value=False) \
         .classes("mt-4 w-full"):
-    
-    # big full-width text area
     log = ui.textarea() \
             .classes("w-full h-[34rem] text-base leading-relaxed") \
             .style("resize: none; overflow-y: scroll;")
-
     log.on('update:model-value', lambda _: autoscroll())
 
 ui.run(reload=False)
