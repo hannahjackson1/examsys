@@ -1,5 +1,5 @@
 from nicegui import ui
-import asyncio, csv, os, time
+import asyncio, csv, os, time, re
 from playwright.async_api import async_playwright
 
 EXAMSYS_BASE = "https://examsys.nottingham.ac.uk"
@@ -15,13 +15,15 @@ USERNAME_SEL        = "input[id^='username']"
 
 pw = browser = ctx = page = None
 
-# --- UoN Branding CSS ---------------------------------------------------
-ui.html('''
+# ---------------------------------------------------------------------
+# Basic UoN-style header
+# ---------------------------------------------------------------------
+ui.html("""
 <style>
   .uon-header {
     background: #001E43;
     color: white;
-    padding: 1rem 1.5rem;
+    padding: 0.9rem 1.5rem;
     font-size: 1.4rem;
     font-weight: 600;
     font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -29,32 +31,19 @@ ui.html('''
     align-items: center;
     justify-content: space-between;
   }
-  .uon-header span.left { display:flex;align-items:center;gap:0.5rem; }
-  .uon-header span.right { font-size:0.8rem;opacity:0.8; }
-
-  /* simple "table-like" summary layout */
-  .summary-row {
-      display:flex;
-      justify-content:space-between;
-      padding:4px 0;
-      border-bottom:1px solid #e5e7eb;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  .uon-header span.left {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
   }
-  .summary-row-label {
-      font-weight:500;
-      color:#001E43;
-  }
-  .summary-row-value {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-      color:#111827;
+  .uon-header span.right {
+    font-size: 0.8rem;
+    opacity: 0.8;
   }
 </style>
-''', sanitize=False)
+""", sanitize=False)
 
 
-# ---------------------------------------------------------------------
-# UTILITY FUNCTION -----------------------------------------------------
-# ---------------------------------------------------------------------
 def absolutize(href: str, base: str = EXAMSYS_BASE) -> str:
     if not href:
         return ""
@@ -73,14 +62,12 @@ def absolutize(href: str, base: str = EXAMSYS_BASE) -> str:
 
 
 # ---------------------------------------------------------------------
-# EXTRACTION LOGIC -----------------------------------------------------
+# EXTRACTION LOGIC
 # ---------------------------------------------------------------------
 async def extract_feedback(report_url: str, output_path: str, log_box):
     global page
 
-    start_time = time.perf_counter()
-    total_students = 0
-    total_rows = 0
+    start = time.perf_counter()
 
     await page.goto(report_url, wait_until="domcontentloaded")
     log_box.value += f"📄 Page title: {await page.title()}\n"
@@ -92,47 +79,35 @@ async def extract_feedback(report_url: str, output_path: str, log_box):
     question_urls = [absolutize(h) for h in hrefs if h and 'textbox_marking' in h]
 
     if not question_urls:
-        log_box.value += "⚠️ No question links found on the report page.\n"
+        log_box.value += "⚠️ No questions found.\n"
         return None
 
     total_qs = len(question_urls)
     log_box.value += f"✅ Found {total_qs} questions.\n"
 
-    # Store total and reset current in localStorage (for progress bar)
+    # Initialise progress state
     await page.evaluate(f"""
         localStorage.setItem('totalQs', {total_qs});
         localStorage.setItem('currentQ', 0);
     """)
 
-    # CSV setup
     with open(output_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow([
-            "question_number",
-            "student_id",
-            "student_label",
-            "mark",
-            "comment",
-            "student_answer",
-        ])
+        writer.writerow(["question_number", "student_id", "student_label",
+                         "mark", "comment", "student_answer"])
 
         for qi, qurl in enumerate(question_urls, 1):
             log_box.value += f"\n➡️ Processing Question {qi}/{total_qs}\n"
 
-            # Update progress info in localStorage and in the orange box
+            # Update progress indicator on the exam page
             await page.evaluate(f"""
                 localStorage.setItem('currentQ', {qi});
-                const total  = parseInt(localStorage.getItem('totalQs') || '{total_qs}', 10);
-                const current = parseInt(localStorage.getItem('currentQ') || '{qi}', 10);
-                const pct = total > 0 ? Math.round((current / total) * 100) : 0;
-
-                let box = document.getElementById('__progress_box__');
-                if (box) {{
-                    const fill = document.getElementById('__progress_fill__');
-                    const txt  = document.getElementById('__progress_txt__');
-                    if (fill) fill.style.width = pct + '%';
-                    if (txt)  txt.textContent = 'Question ' + current + ' of ' + total + ' (' + pct + '%)';
-                }}
+                const total = {total_qs};
+                const pct = Math.round(({qi} / total) * 100);
+                let txt = document.getElementById('__progress_txt__');
+                let fill = document.getElementById('__progress_fill__');
+                if (txt) txt.textContent = 'Question {qi} of {total_qs} (' + pct + '%)';
+                if (fill) fill.style.width = pct + '%';
             """)
 
             try:
@@ -144,7 +119,6 @@ async def extract_feedback(report_url: str, output_path: str, log_box):
 
             blocks = page.locator(STUDENT_BLOCKS_SEL)
             count = await blocks.count()
-            total_students += count
             log_box.value += f"🧑‍🎓 Found {count} students\n"
 
             for si in range(count):
@@ -165,60 +139,65 @@ async def extract_feedback(report_url: str, output_path: str, log_box):
                       if await b.locator(COMMENT_SEL).count() else ""
 
                 writer.writerow([qi, sid, label, mark, com, ans])
-                total_rows += 1
                 log_box.value += (
                     f"  ✅ {label} ({sid}) | mark={mark} "
                     f"| ans={len(ans)} chars | comm={len(com)} chars\n"
                 )
 
-            # Go back to report page for next question
+            # Back to report page for next question
             await page.goto(report_url, wait_until="domcontentloaded")
             await asyncio.sleep(0.25)
 
-    # Mark complete visually
+    # Final progress bar state
     await page.evaluate("""
-        const fill = document.getElementById('__progress_fill__');
-        const txt  = document.getElementById('__progress_txt__');
-        if (fill) {
-            fill.style.width = '100%';
-            fill.style.background = '#4caf50';
-        }
+        let txt = document.getElementById('__progress_txt__');
+        let fill = document.getElementById('__progress_fill__');
         if (txt) txt.textContent = '✅ Extraction Complete';
+        if (fill) fill.style.width = '100%';
     """)
 
-    elapsed = time.perf_counter() - start_time
-    log_box.value += f"\n🎉 Done → {output_path} (in {elapsed:.1f}s)\n"
+    elapsed = time.perf_counter() - start
+    log_box.value += f"\n🎉 Done → {output_path}\n"
 
+    # Download + toast (NiceGUI 2: no label kwarg)
     ui.notify(f"✅ CSV saved: {os.path.basename(output_path)}", type="positive")
-    ui.download(
-        output_path,
-        label="⬇️ Download CSV",
-        filename=os.path.basename(output_path),
-    ).classes("bg-green-600 text-white mt-2 px-3 py-1 rounded")
+    ui.download(output_path, filename=os.path.basename(output_path))
 
-    # Summary for UI
-    return {
-        "total_questions": total_qs,
-        "total_students": total_students,
-        "total_rows": total_rows,
-        "output_file": os.path.basename(output_path),
-        "duration": elapsed,
-    }
+    return elapsed  # we’ll use this for "Duration" in the summary
 
 
 # ---------------------------------------------------------------------
-# LOGIN + NAVIGATION FLOW ----------------------------------------------
+# PARSE SUMMARY FROM LOG
 # ---------------------------------------------------------------------
-async def choose_and_extract(log_box, output_input, summary_card, summary_labels):
+def parse_summary_from_log(log_text: str):
+    """Parse the log text to compute questions, students, and rows."""
+    # Total questions = number of "Processing Question" lines
+    q_matches = re.findall(r"^➡️ Processing Question", log_text, flags=re.MULTILINE)
+    total_questions = len(q_matches)
+
+    # Total students = max of "Found X students" across questions
+    student_matches = re.findall(r"Found (\d+) students", log_text)
+    total_students = max(map(int, student_matches)) if student_matches else 0
+
+    # Total CSV rows = count of student result lines
+    row_matches = re.findall(r"^\s*✅ Student ", log_text, flags=re.MULTILINE)
+    total_rows = len(row_matches)
+
+    return total_questions, total_students, total_rows
+
+
+# ---------------------------------------------------------------------
+# LOGIN + EXTRACTION WORKFLOW
+# ---------------------------------------------------------------------
+async def choose_and_extract(log_box, output_input, summary_labels):
     global pw, browser, ctx, page
-    summary = None
 
     pw = await async_playwright().start()
     browser = await pw.chromium.launch(headless=False)
     ctx = await browser.new_context()
     page = await ctx.new_page()
 
-    # Persistent "This is my exam" button + progress bar (KNOWN-WORKING VERSION)
+    # Persistent exam button + progress bar (this is your known-good logic)
     await ctx.add_init_script("""
         (function(){
             function ensureProgressBox() {
@@ -249,7 +228,9 @@ async def choose_and_extract(log_box, output_input, summary_card, summary_labels
                     box.innerHTML = `
                         <div id="__progress_txt__"
                              style="height:24px; line-height:24px; font-size:15px; overflow:hidden;">
-                             ${pct > 0 ? 'Question ' + current + ' of ' + total + ' (' + pct + '%)' : '0%'}
+                             ${pct > 0
+                                 ? 'Question ' + current + ' of ' + total + ' (' + pct + '%)'
+                                 : '0%'}
                         </div>
                         <div style="background:white;height:8px;border-radius:5px;overflow:hidden;margin-top:8px;">
                             <div id="__progress_fill__" style="
@@ -324,34 +305,36 @@ async def choose_and_extract(log_box, output_input, summary_card, summary_labels
         log_box.value += "🔐 Opening ExamSys login page...\n"
         await page.goto(EXAMSYS_BASE)
 
-        log_box.value += "🌐 Log in via SSO, navigate to your exam, then click ✅ This is my exam.\n"
+        log_box.value += "🌐 Log in, navigate to the exam, then click ‘This is my exam’.\n"
         chosen_url = await exam_future
-        log_box.value += f"✅ Exam selected: {chosen_url}\n"
+        log_box.value += f"✅ Exam selected:\n{chosen_url}\n"
 
         # Navigate to Reports → Primary Mark by Question
-        await page.wait_for_selector("a:has-text('Reports')", timeout=10000)
         await page.click("a:has-text('Reports')")
-        await page.wait_for_selector("a:has-text('Primary Mark by Question')", timeout=10000)
         await page.click("a:has-text('Primary Mark by Question')")
         await page.wait_for_load_state("domcontentloaded")
-        await asyncio.sleep(1)
+
         report_url = page.url
-        log_box.value += f"✅ Arrived at report page:\n{report_url}\n"
+        log_box.value += f"📄 Report page:\n{report_url}\n"
 
         log_box.value += "🚀 Starting extraction...\n"
-        summary = await extract_feedback(report_url, output_input.value, log_box)
 
-        # Update summary UI once everything's done
-        if summary:
-            summary_labels['questions'].text = str(summary["total_questions"])
-            summary_labels['students'].text = str(summary["total_students"])
-            summary_labels['rows'].text = str(summary["total_rows"])
-            summary_labels['file'].text = summary["output_file"]
-            summary_labels['duration'].text = f"{summary['duration']:.1f} seconds"
-            summary_card.classes(remove='hidden')
+        # Run extraction (returns elapsed time)
+        elapsed = await extract_feedback(report_url, output_input.value, log_box)
+
+        # --- parse summary from the log text ---
+        log_text = log_box.value
+        total_questions, total_students, total_rows = parse_summary_from_log(log_text)
+
+        # Update summary labels (always-visible card)
+        summary_labels['questions'].text = str(total_questions) if total_questions else "–"
+        summary_labels['students'].text = str(total_students) if total_students else "–"
+        summary_labels['rows'].text = str(total_rows) if total_rows else "–"
+        summary_labels['file'].text = os.path.basename(output_input.value)
+        summary_labels['duration'].text = f"{elapsed:.1f}s" if elapsed is not None else "–"
 
     finally:
-        # Close Playwright stuff AFTER extraction completes
+        # Close Playwright *after* extraction and summary update
         try:
             if ctx:
                 await ctx.close()
@@ -368,15 +351,13 @@ async def choose_and_extract(log_box, output_input, summary_card, summary_labels
         except:
             pass
 
-        ui.notify("✅ Extraction complete — browser closed", type="positive")
+        ui.notify("Extraction complete — browser closed", type="positive")
         log_box.value += "\n✅ Browser and session closed.\n"
 
 
 # ---------------------------------------------------------------------
-# GUI -----------------------------------------------------------------
+# GUI LAYOUT
 # ---------------------------------------------------------------------
-
-# Header with title + credit
 ui.html(
     '<div class="uon-header">'
     '<span class="left">🦜 ExamSys Short-Answer Extractor</span>'
@@ -385,34 +366,22 @@ ui.html(
     sanitize=False,
 )
 
-# Step 1: Output filename
+# Step 1: Filename
 with ui.card().classes("w-full mt-4 p-4"):
-    ui.label("Step 1: Choose Output Filename").classes("text-lg font-semibold mb-2")
+    ui.label("Choose a name for your output CSV file") \
+        .classes("text-lg font-semibold mb-2")
     output_in = ui.input(value=DEFAULT_OUTPUT) \
-                  .props('outlined dense clearable') \
-                  .classes("w-full")
+        .props('outlined dense clearable') \
+        .classes("w-full text-base p-2")
 
-# Summary card (table-like, initially hidden)
-with ui.card().classes("w-full mt-4 p-4 hidden") as summary_card:
-    ui.label("Extraction Summary").classes("text-lg font-semibold mb-3")
-    summary_labels = {}
+# We’ll define summary_labels later but reference it in start()
+summary_labels = {}
 
-    def add_summary_row(label_text, key):
-        with ui.row().classes("summary-row"):
-            ui.label(label_text).classes("summary-row-label")
-            summary_labels[key] = ui.label("–").classes("summary-row-value")
-
-    add_summary_row("Total questions detected", "questions")
-    add_summary_row("Total students detected", "students")
-    add_summary_row("Total rows in CSV", "rows")
-    add_summary_row("Output file", "file")
-    add_summary_row("Duration", "duration")
-
-# Step 2: Login + extract controls
+# Step 2: Login and extract
 with ui.card().classes("w-full mt-4 p-4"):
     ui.label("Step 2: Log in and extract").classes("text-lg font-semibold mb-2")
     ui.label(
-        "Click below, log into ExamSys in the popup window, "
+        "Click the button below, log into ExamSys in the popup window, "
         "navigate to the correct exam, then press ‘✅ This is my exam’."
     ).classes("text-sm text-gray-700 mb-3")
 
@@ -422,22 +391,39 @@ with ui.card().classes("w-full mt-4 p-4"):
             if (el) el.scrollTop = el.scrollHeight;
         """)
 
-    def start():
+    async def start():
         log.value = "🌐 Opening ExamSys login page…\n"
         autoscroll()
-        asyncio.create_task(choose_and_extract(log, output_in, summary_card, summary_labels))
+        await choose_and_extract(log, output_in, summary_labels)
 
     ui.button(
-        "LOGIN → CHOOSE EXAM → EXTRACT",
+        "Login → Choose Exam → Extract",
         on_click=start,
     ).classes("mt-1 mb-3 bg-[#0095C8] text-white text-lg px-6 py-2 rounded")
 
-# Full-width Extraction Log (collapsible)
-with ui.expansion('Extraction Log', icon='article', value=False) \
-        .classes("mt-4 w-full"):
+
+# ALWAYS-VISIBLE SUMMARY CARD
+with ui.card().classes("w-full mt-4 p-4"):
+    ui.label("Extraction Summary").classes("text-lg font-semibold mb-3")
+
+    def make_row(label, key):
+        with ui.row().classes("justify-between w-full mb-1"):
+            ui.label(label).classes("font-medium")
+            summary_labels[key] = ui.label("–").classes("font-mono")
+
+    make_row("Total questions:", "questions")
+    make_row("Total students:", "students")
+    make_row("Total CSV rows:", "rows")
+    make_row("Output filename:", "file")
+    make_row("Duration:", "duration")
+
+
+# Extraction log
+with ui.expansion('Extraction Log', value=False).classes("mt-4 w-full"):
     log = ui.textarea() \
-            .classes("w-full h-[34rem] text-base leading-relaxed") \
-            .style("resize: none; overflow-y: scroll;")
+        .classes("w-full h-[34rem] text-base leading-relaxed") \
+        .style("resize:none;overflow-y:scroll;")
     log.on('update:model-value', lambda _: autoscroll())
+
 
 ui.run(reload=False)
