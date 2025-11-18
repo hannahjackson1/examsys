@@ -1,5 +1,5 @@
 from nicegui import ui
-import asyncio, csv, os, time, re
+import asyncio, csv, os, time, re, sys
 from playwright.async_api import async_playwright
 
 EXAMSYS_BASE = "https://examsys.nottingham.ac.uk"
@@ -15,9 +15,9 @@ USERNAME_SEL        = "input[id^='username']"
 
 pw = browser = ctx = page = None
 
-# ---------------------------------------------------------------------
-# Basic UoN-style header
-# ---------------------------------------------------------------------
+# -----------------------------
+# UoN stylesheet
+# -----------------------------
 ui.html("""
 <style>
   .uon-header {
@@ -26,19 +26,10 @@ ui.html("""
     padding: 0.9rem 1.5rem;
     font-size: 1.4rem;
     font-weight: 600;
-    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont,'Segoe UI',sans-serif;
     display: flex;
     align-items: center;
     justify-content: space-between;
-  }
-  .uon-header span.left {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.5rem;
-  }
-  .uon-header span.right {
-    font-size: 0.8rem;
-    opacity: 0.8;
   }
 </style>
 """, sanitize=False)
@@ -61,9 +52,9 @@ def absolutize(href: str, base: str = EXAMSYS_BASE) -> str:
     return f"{base.rstrip('/')}/{href.lstrip('/')}"
 
 
-# ---------------------------------------------------------------------
+# --------------------------------------------------------
 # EXTRACTION LOGIC
-# ---------------------------------------------------------------------
+# --------------------------------------------------------
 async def extract_feedback(report_url: str, output_path: str, log_box):
     global page
 
@@ -85,28 +76,27 @@ async def extract_feedback(report_url: str, output_path: str, log_box):
     total_qs = len(question_urls)
     log_box.value += f"✅ Found {total_qs} questions.\n"
 
-    # Initialise progress state
     await page.evaluate(f"""
         localStorage.setItem('totalQs', {total_qs});
         localStorage.setItem('currentQ', 0);
     """)
 
+    # open CSV
     with open(output_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["question_number", "student_id", "student_label",
-                         "mark", "comment", "student_answer"])
+        writer.writerow(["question_number","student_id","student_label",
+                         "mark","comment","student_answer"])
 
         for qi, qurl in enumerate(question_urls, 1):
             log_box.value += f"\n➡️ Processing Question {qi}/{total_qs}\n"
 
-            # Update progress indicator on the exam page
             await page.evaluate(f"""
                 localStorage.setItem('currentQ', {qi});
                 const total = {total_qs};
                 const pct = Math.round(({qi} / total) * 100);
-                let txt = document.getElementById('__progress_txt__');
+                let txt  = document.getElementById('__progress_txt__');
                 let fill = document.getElementById('__progress_fill__');
-                if (txt) txt.textContent = 'Question {qi} of {total_qs} (' + pct + '%)';
+                if (txt)  txt.textContent = 'Question {qi} of {total_qs} (' + pct + '%)';
                 if (fill) fill.style.width = pct + '%';
             """)
 
@@ -144,11 +134,9 @@ async def extract_feedback(report_url: str, output_path: str, log_box):
                     f"| ans={len(ans)} chars | comm={len(com)} chars\n"
                 )
 
-            # Back to report page for next question
             await page.goto(report_url, wait_until="domcontentloaded")
             await asyncio.sleep(0.25)
 
-    # Final progress bar state
     await page.evaluate("""
         let txt = document.getElementById('__progress_txt__');
         let fill = document.getElementById('__progress_fill__');
@@ -159,36 +147,31 @@ async def extract_feedback(report_url: str, output_path: str, log_box):
     elapsed = time.perf_counter() - start
     log_box.value += f"\n🎉 Done → {output_path}\n"
 
-    # Download + toast (NiceGUI 2: no label kwarg)
     ui.notify(f"✅ CSV saved: {os.path.basename(output_path)}", type="positive")
     ui.download(output_path, filename=os.path.basename(output_path))
 
-    return elapsed  # we’ll use this for "Duration" in the summary
+    return elapsed
 
 
-# ---------------------------------------------------------------------
-# PARSE SUMMARY FROM LOG
-# ---------------------------------------------------------------------
+# --------------------------------------------------------
+# PARSE SUMMARY
+# --------------------------------------------------------
 def parse_summary_from_log(log_text: str):
-    """Parse the log text to compute questions, students, and rows."""
-    # Total questions = number of "Processing Question" lines
     q_matches = re.findall(r"^➡️ Processing Question", log_text, flags=re.MULTILINE)
     total_questions = len(q_matches)
 
-    # Total students = max of "Found X students" across questions
     student_matches = re.findall(r"Found (\d+) students", log_text)
     total_students = max(map(int, student_matches)) if student_matches else 0
 
-    # Total CSV rows = count of student result lines
-    row_matches = re.findall(r"^\s*✅ Student ", log_text, flags=re.MULTILINE)
+    row_matches = re.findall(r"^\s*✅", log_text, flags=re.MULTILINE)
     total_rows = len(row_matches)
 
     return total_questions, total_students, total_rows
 
 
-# ---------------------------------------------------------------------
-# LOGIN + EXTRACTION WORKFLOW
-# ---------------------------------------------------------------------
+# --------------------------------------------------------
+# LOGIN + EXTRACTION
+# --------------------------------------------------------
 async def choose_and_extract(log_box, output_input, summary_labels):
     global pw, browser, ctx, page
 
@@ -197,93 +180,66 @@ async def choose_and_extract(log_box, output_input, summary_labels):
     ctx = await browser.new_context()
     page = await ctx.new_page()
 
-    # Persistent exam button + progress bar (this is your known-good logic)
+    # Inject exam button & progress bar
     await ctx.add_init_script("""
         (function(){
             function ensureProgressBox() {
-                const total  = parseInt(localStorage.getItem('totalQs') || '0', 10);
+                const total   = parseInt(localStorage.getItem('totalQs') || '0', 10);
                 const current = parseInt(localStorage.getItem('currentQ') || '0', 10);
-                const pct = (total > 0) ? Math.round((current / total) * 100) : 0;
+                const pct = (total > 0) ? Math.round((current/total)*100) : 0;
 
                 let box = document.getElementById('__progress_box__');
                 if (!box) {
                     box = document.createElement('div');
                     box.id = '__progress_box__';
-                    Object.assign(box.style, {
-                        position: 'fixed',
-                        bottom: '30px',
-                        right: '30px',
-                        width: '260px',
-                        height: '85px',
-                        background: '#f57c00',
-                        color: 'white',
-                        padding: '1em',
-                        borderRadius: '10px',
-                        fontFamily: 'system-ui',
-                        zIndex: 999999,
-                        boxShadow: '0 2px 6px rgba(0,0,0,0.3)',
-                        textAlign: 'center',
-                        boxSizing: 'border-box',
+                    Object.assign(box.style,{
+                        position:'fixed',bottom:'30px',right:'30px',
+                        width:'260px',height:'85px',
+                        background:'#f57c00',color:'white',
+                        padding:'1em',borderRadius:'10px',
+                        fontFamily:'system-ui',zIndex:999999,
+                        textAlign:'center',boxSizing:'border-box'
                     });
-                    box.innerHTML = `
-                        <div id="__progress_txt__"
-                             style="height:24px; line-height:24px; font-size:15px; overflow:hidden;">
-                             ${pct > 0
-                                 ? 'Question ' + current + ' of ' + total + ' (' + pct + '%)'
-                                 : '0%'}
+                    box.innerHTML=`
+                        <div id="__progress_txt__" style="height:24px;line-height:24px;font-size:15px;">
+                            ${pct>0?'Question '+current+' of '+total+' ('+pct+'%)':'0%'}
                         </div>
                         <div style="background:white;height:8px;border-radius:5px;overflow:hidden;margin-top:8px;">
-                            <div id="__progress_fill__" style="
-                                height:8px;
-                                width:${pct}%;
-                                background:#4caf50;
-                                transition:width 0.4s ease;
-                            "></div>
+                            <div id="__progress_fill__" style="height:8px;width:${pct}%;background:#4caf50;"></div>
                         </div>`;
                     document.body.appendChild(box);
                 } else {
-                    const fill = document.getElementById('__progress_fill__');
-                    const txt  = document.getElementById('__progress_txt__');
-                    if (fill) fill.style.width = pct + '%';
-                    if (txt)  txt.textContent =
-                        (pct > 0 && total > 0)
-                        ? 'Question ' + current + ' of ' + total + ' (' + pct + '%)'
-                        : '0%';
+                    let txt=document.getElementById('__progress_txt__');
+                    let fill=document.getElementById('__progress_fill__');
+                    if (txt)  txt.textContent=(pct>0?'Question '+current+' of '+total+' ('+pct+'%)':'0%');
+                    if (fill) fill.style.width=pct+'%';
                 }
             }
 
-            function render() {
-                const extracting = (localStorage.getItem('__EXTRACT_MODE__') === '1');
-                if (extracting) {
-                    const btn = document.getElementById('__exam_btn__');
-                    if (btn) btn.remove();
+            function render(){
+                const extracting = (localStorage.getItem('__EXTRACT_MODE__')==='1');
+                if (extracting){
+                    let btn=document.getElementById('__exam_btn__'); if(btn) btn.remove();
                     ensureProgressBox();
                     return;
                 }
 
-                if (!document.getElementById('__exam_btn__')) {
-                    const btn = document.createElement('button');
-                    btn.id = '__exam_btn__';
-                    btn.textContent = '✅ This is my exam';
-                    Object.assign(btn.style, {
-                        position: 'fixed',
-                        bottom: '30px',
-                        right: '30px',
-                        background: 'green',
-                        color: 'white',
-                        padding: '1em 1.5em',
-                        fontSize: '18px',
-                        zIndex: 999999,
-                        borderRadius: '10px',
-                        border: 'none',
-                        cursor: 'pointer',
-                        fontFamily: 'system-ui',
-                        boxShadow: '0 2px 6px rgba(0,0,0,0.3)',
+                if(!document.getElementById('__exam_btn__')){
+                    const btn=document.createElement('button');
+                    btn.id='__exam_btn__';
+                    btn.textContent='✅ This is my exam';
+                    Object.assign(btn.style,{
+                        position:'fixed',bottom:'30px',right:'30px',
+                        background:'green',color:'white',
+                        padding:'1em 1.5em',fontSize:'18px',
+                        zIndex:999999,borderRadius:'10px',
+                        border:'none',cursor:'pointer',
+                        fontFamily:'system-ui'
                     });
-                    btn.onclick = () => {
-                        localStorage.setItem('__EXTRACT_MODE__', '1');
-                        localStorage.setItem('totalQs', '0');
-                        localStorage.setItem('currentQ', '0');
+                    btn.onclick=()=>{
+                        localStorage.setItem('__EXTRACT_MODE__','1');
+                        localStorage.setItem('totalQs','0');
+                        localStorage.setItem('currentQ','0');
                         btn.remove();
                         if (window.examChosen) window.examChosen(window.location.href);
                         ensureProgressBox();
@@ -292,9 +248,9 @@ async def choose_and_extract(log_box, output_input, summary_labels):
                 }
             }
 
-            document.addEventListener('DOMContentLoaded', render);
-            window.addEventListener('load', render);
-            try { render(); } catch (e) {}
+            document.addEventListener('DOMContentLoaded',render);
+            window.addEventListener('load',render);
+            try{render();}catch(e){}
         })();
     """)
 
@@ -305,11 +261,10 @@ async def choose_and_extract(log_box, output_input, summary_labels):
         log_box.value += "🔐 Opening ExamSys login page...\n"
         await page.goto(EXAMSYS_BASE)
 
-        log_box.value += "🌐 Log in, navigate to the exam, then click ‘This is my exam’.\n"
+        log_box.value += "🌐 Log in then click ‘This is my exam’.\n"
         chosen_url = await exam_future
         log_box.value += f"✅ Exam selected:\n{chosen_url}\n"
 
-        # Navigate to Reports → Primary Mark by Question
         await page.click("a:has-text('Reports')")
         await page.click("a:has-text('Primary Mark by Question')")
         await page.wait_for_load_state("domcontentloaded")
@@ -319,70 +274,50 @@ async def choose_and_extract(log_box, output_input, summary_labels):
 
         log_box.value += "🚀 Starting extraction...\n"
 
-        # Run extraction (returns elapsed time)
         elapsed = await extract_feedback(report_url, output_input.value, log_box)
 
-        # --- parse summary from the log text ---
+        # Parse summary
         log_text = log_box.value
-        total_questions, total_students, total_rows = parse_summary_from_log(log_text)
+        q, st, rows = parse_summary_from_log(log_text)
 
-        # Update summary labels (always-visible card)
-        summary_labels['questions'].text = str(total_questions) if total_questions else "–"
-        summary_labels['students'].text = str(total_students) if total_students else "–"
-        summary_labels['rows'].text = str(total_rows) if total_rows else "–"
-        summary_labels['file'].text = os.path.basename(output_input.value)
-        summary_labels['duration'].text = f"{elapsed:.1f}s" if elapsed is not None else "–"
+        summary_labels["questions"].text = str(q) if q else "–"
+        summary_labels["students"].text  = str(st) if st else "–"
+        summary_labels["rows"].text      = str(rows) if rows else "–"
+        summary_labels["file"].text      = os.path.basename(output_input.value)
+        summary_labels["duration"].text  = f"{elapsed:.1f}s" if elapsed else "–"
 
     finally:
-        # Close Playwright *after* extraction and summary update
-        try:
-            if ctx:
-                await ctx.close()
-        except:
-            pass
-        try:
-            if browser:
-                await browser.close()
-        except:
-            pass
-        try:
-            if pw:
-                await pw.stop()
-        except:
-            pass
+        try: await ctx.close()
+        except: pass
+        try: await browser.close()
+        except: pass
+        try: await pw.stop()
+        except: pass
 
         ui.notify("Extraction complete — browser closed", type="positive")
         log_box.value += "\n✅ Browser and session closed.\n"
 
 
-# ---------------------------------------------------------------------
+# --------------------------------------------------------
 # GUI LAYOUT
-# ---------------------------------------------------------------------
+# --------------------------------------------------------
 ui.html(
-    '<div class="uon-header">'
-    '<span class="left">🦜 ExamSys Short-Answer Extractor</span>'
-    '<span class="right">Developed by Dr Hannah Jackson</span>'
-    '</div>',
+    '<div class="uon-header">🦜 ExamSys Short-Answer Extractor</div>',
     sanitize=False,
 )
 
-# Step 1: Filename
+# Step 1 — filename
 with ui.card().classes("w-full mt-4 p-4"):
-    ui.label("Choose a name for your output CSV file") \
-        .classes("text-lg font-semibold mb-2")
-    output_in = ui.input(value=DEFAULT_OUTPUT) \
-        .props('outlined dense clearable') \
-        .classes("w-full text-base p-2")
+    ui.label("Choose a name for your output CSV file").classes("text-lg font-semibold mb-2")
+    output_in = ui.input(value=DEFAULT_OUTPUT).props('outlined dense clearable').classes("w-full")
 
-# We’ll define summary_labels later but reference it in start()
 summary_labels = {}
 
-# Step 2: Login and extract
+# Step 2 — login & extract
 with ui.card().classes("w-full mt-4 p-4"):
     ui.label("Step 2: Log in and extract").classes("text-lg font-semibold mb-2")
     ui.label(
-        "Click the button below, log into ExamSys in the popup window, "
-        "navigate to the correct exam, then press ‘✅ This is my exam’."
+        "Click the button below, log in, navigate to the exam, then press ‘This is my exam’."
     ).classes("text-sm text-gray-700 mb-3")
 
     def autoscroll():
@@ -396,13 +331,10 @@ with ui.card().classes("w-full mt-4 p-4"):
         autoscroll()
         await choose_and_extract(log, output_in, summary_labels)
 
-    ui.button(
-        "Login → Choose Exam → Extract",
-        on_click=start,
-    ).classes("mt-1 mb-3 bg-[#0095C8] text-white text-lg px-6 py-2 rounded")
+    ui.button("Login → Choose Exam → Extract", on_click=start) \
+        .classes("mt-1 mb-3 bg-[#0095C8] text-white text-lg px-6 py-2 rounded")
 
-
-# ALWAYS-VISIBLE SUMMARY CARD
+# Summary card
 with ui.card().classes("w-full mt-4 p-4"):
     ui.label("Extraction Summary").classes("text-lg font-semibold mb-3")
 
@@ -417,13 +349,45 @@ with ui.card().classes("w-full mt-4 p-4"):
     make_row("Output filename:", "file")
     make_row("Duration:", "duration")
 
-
-# Extraction log
+# Log
 with ui.expansion('Extraction Log', value=False).classes("mt-4 w-full"):
-    log = ui.textarea() \
-        .classes("w-full h-[34rem] text-base leading-relaxed") \
-        .style("resize:none;overflow-y:scroll;")
+    log = ui.textarea().classes("w-full h-[34rem] text-base leading-relaxed").style("resize:none;overflow-y:scroll;")
     log.on('update:model-value', lambda _: autoscroll())
 
+
+# --------------------------------------------------------
+# SAFE SHUTDOWN BUTTON
+# --------------------------------------------------------
+async def shutdown_server():
+    # Schedule notification on UI thread
+    ui.timer(0.1, lambda: ui.notify("Shutting down…", type="info"), once=True)
+
+    await asyncio.sleep(0.3)
+
+    # Cleanly shut down NiceGUI
+    await ui.get_app().shutdown()
+
+    # Kill Python quietly
+    os._exit(0)
+
+
+ui.button(
+    "Close App",
+    on_click=lambda: asyncio.create_task(shutdown_server()),
+).classes("mt-6 bg-red-600 text-white px-4 py-2 rounded")
+
+
+# Credit watermark
+ui.html("""
+<div style="
+    position:fixed;
+    bottom:8px;right:12px;
+    font-size:0.75rem;
+    opacity:0.6;color:#4b5563;
+    pointer-events:none;
+    font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+    Developed by Dr Hannah Jackson: hannah.jackson@nottingham.ac.uk
+</div>
+""", sanitize=False)
 
 ui.run(reload=False)
