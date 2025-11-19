@@ -2,6 +2,7 @@ from nicegui import ui, app
 import asyncio, csv, os, time, re, sys, traceback
 from playwright.async_api import async_playwright
 
+
 EXAMSYS_BASE = "https://examsys.nottingham.ac.uk"
 DEFAULT_OUTPUT = "exam_feedback_by_question.csv"
 
@@ -25,9 +26,10 @@ def new_log_file() -> str:
     ts = time.strftime("%Y-%m-%d_%H-%M-%S")
     return os.path.join(LOG_DIR, f"examsys_log_{ts}.txt")
 
-CURRENT_LOG_FILE = None
+CURRENT_LOG_FILE = None  # will be set fresh on each extraction run
 
 def append_log(text: str):
+    """Append text safely to the current log file for this run."""
     global CURRENT_LOG_FILE
     if not CURRENT_LOG_FILE:
         CURRENT_LOG_FILE = new_log_file()
@@ -39,16 +41,32 @@ def append_log(text: str):
 
 
 # ------------------------------------------------------------
-# UoN Header
+# Header styling
 # ------------------------------------------------------------
 ui.html("""
 <style>
-  .uon-header {
+  .header {
     background: #001E43;
     color: white;
     padding: 0.9rem 1.5rem;
     font-size: 1.4rem;
     font-weight: 600;
+    font-family: system-ui, sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+</style>
+""", sanitize=False)
+
+ui.html("""
+<style>
+  .subheader {
+    background: #001E43;
+    color: lightgrey;
+    padding: 0.1rem 1.5rem;
+    font-size: 1rem;
+    font-weight: 200;
     font-family: system-ui, sans-serif;
     display: flex;
     align-items: center;
@@ -210,10 +228,10 @@ def parse_summary_from_log(log_text: str):
     q_matches = re.findall(r"^➡️ Processing Question", log_text, flags=re.MULTILINE)
     total_questions = len(q_matches)
 
-    student_matches = re.findall(r"Found (\\d+) students", log_text)
+    student_matches = re.findall(r"Found (\d+) students", log_text)
     total_students = max(map(int, student_matches)) if student_matches else 0
 
-    row_matches = re.findall(r"^\\s*✅ ", log_text, flags=re.MULTILINE)
+    row_matches = re.findall(r"^\s*✅ ", log_text, flags=re.MULTILINE)
     total_rows = len(row_matches)
 
     return total_questions, total_students, total_rows
@@ -225,6 +243,7 @@ def parse_summary_from_log(log_text: str):
 async def choose_and_extract(log_box, output_input, summary_labels):
     global pw, browser, ctx, page, CURRENT_LOG_FILE
 
+    # New log file for this extraction run
     CURRENT_LOG_FILE = new_log_file()
     append_log(f"=== New Extraction Session: {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
 
@@ -233,7 +252,7 @@ async def choose_and_extract(log_box, output_input, summary_labels):
     ctx = await browser.new_context()
     page = await ctx.new_page()
 
-    # Inject button + progress bar
+    # Inject exam button + progress bar (working logic)
     await ctx.add_init_script("""
         (function(){
             function ensureProgressBox(){
@@ -341,6 +360,7 @@ async def choose_and_extract(log_box, output_input, summary_labels):
 
         elapsed = await extract_feedback(report_url, output_input.value, log_box)
 
+        # Parse log summary
         tq, ts, tr = parse_summary_from_log(log_box.value)
 
         summary_labels['questions'].text = str(tq)
@@ -360,18 +380,26 @@ async def choose_and_extract(log_box, output_input, summary_labels):
     finally:
         append_log("Closing Playwright...\n")
 
-        # 🔧 FIXED SHUTDOWN LOGIC
+        # Close context and browser cleanly
         try:
-            if page:
-                await page.close()
             if ctx:
                 await ctx.close()
+        except Exception:
+            append_log("Error while closing context:\n")
+            append_log(traceback.format_exc())
+
+        try:
             if browser:
                 await browser.close()
-            if pw:
-                await pw.stop()   # ← THIS is the correct method
         except Exception:
-            append_log("Error while closing Playwright objects:\n")
+            append_log("Error while closing browser:\n")
+            append_log(traceback.format_exc())
+
+        try:
+            if pw:
+                await pw.stop()   # Playwright uses stop(), not close()
+        except Exception:
+            append_log("Error while stopping Playwright:\n")
             append_log(traceback.format_exc())
 
         ui.notify("Extraction complete — browser closed", type="positive")
@@ -383,16 +411,21 @@ async def choose_and_extract(log_box, output_input, summary_labels):
 # GUI Layout
 # ------------------------------------------------------------
 ui.html(
-    '<div class="uon-header"><span class="left">🦜 ExamSys Short-Answer Extractor</span></div>',
+    '''
+    <div class="header"><span class="left">🦊 FOXES: ExamSys Feedback Extractor</span></div>
+    <div class="subheader"> Feedback Output Xtractor: Examsys SAQ </div>
+    ''',
     sanitize=False,
 )
 
+# Step 1
 with ui.card().classes("w-full mt-4 p-4"):
     ui.label("Choose a name for your output CSV file").classes("text-lg font-semibold mb-2")
     output_in = ui.input(value=DEFAULT_OUTPUT).props('outlined dense clearable').classes("w-full text-base p-2")
 
 summary_labels = {}
 
+# Step 2
 with ui.card().classes("w-full mt-4 p-4"):
     ui.label("Step 2: Log in and extract").classes("text-lg font-semibold mb-2")
     ui.label(
@@ -401,10 +434,12 @@ with ui.card().classes("w-full mt-4 p-4"):
 
     def autoscroll():
         ui.run_javascript(
-            f"const el=document.querySelector('#{log.id}'); if(el) el.scrollTop=el.scrollHeight;"
+            f"const el=document.querySelector('#{log.id}');"
+            " if(el) el.scrollTop=el.scrollHeight;"
         )
 
     async def start():
+        # Reset UI log and kick off a new extraction run (which creates a new .logs file)
         log.value = "🌐 Opening ExamSys login page…\n"
         autoscroll()
         await choose_and_extract(log, output_in, summary_labels)
@@ -416,7 +451,7 @@ with ui.card().classes("w-full mt-4 p-4"):
 
 
 # ------------------------------------------------------------
-# Summary card
+# COMPACT TWO-COLUMN SUMMARY CARD (RIGHT-ALIGNED)
 # ------------------------------------------------------------
 with ui.card().classes("w-full mt-4 p-3"):
     ui.label("Extraction Summary").classes("text-md font-semibold mb-2 text-[#334155]")
@@ -431,8 +466,12 @@ with ui.card().classes("w-full mt-4 p-3"):
             color: #334155;
             align-items: center;
         }
-        .summary-label { opacity: 0.8; }
-        .summary-value { text-align: right; }
+        .summary-label {
+            opacity: 0.8;
+        }
+        .summary-value {
+            text-align: right;
+        }
         .summary-footer {
             margin-top: 8px;
             font-size: 0.8rem;
@@ -464,31 +503,63 @@ with ui.card().classes("w-full mt-4 p-3"):
             summary_labels['path'] = ui.label("–").classes("font-mono text-[0.7rem] truncate")
 
 
-# ------------------------------------------------------------
 # Log window
-# ------------------------------------------------------------
 with ui.expansion('Extraction Log', value=False).classes("mt-4 w-full"):
-    log = ui.textarea().classes("w-full h-[34rem] text-base").style(
-        "resize:none;overflow-y:scroll;"
-    )
+    log = ui.textarea().classes("w-full h-[34rem] text-base").style("resize:none;overflow-y:scroll;")
     log.on('update:model-value', lambda _: autoscroll())
 
 
 # ------------------------------------------------------------
-# Safe shutdown
+# Close App button with JS tab-close + extra cleanup
 # ------------------------------------------------------------
 async def shutdown_server():
-    ui.notify("Shutting down…", type="info")
-    append_log("Shutdown requested by user.\n")
-    await asyncio.sleep(0.2)
-    await app.shutdown()
-    sys.exit(0)
+    global pw, browser, ctx
+    append_log("Shutdown requested by user via Close App button.\n")
 
-ui.button("Close App", on_click=lambda: asyncio.create_task(shutdown_server())).classes(
-    "mt-6 bg-red-600 text-white px-4 py-2 rounded"
-)
+    # Ask browser tab/window to close (works in many launcher scenarios)
+    ui.run_javascript("""
+        try {
+            window.open('', '_self');
+            window.close();
+        } catch (e) {
+            console.log('window.close() blocked:', e);
+        }
+    """)
+
+    # Try to cleanly close any remaining Playwright objects (if user closes mid-session)
+    try:
+        if ctx:
+            await ctx.close()
+    except Exception:
+        append_log("Error while closing context in shutdown_server:\n")
+        append_log(traceback.format_exc())
+
+    try:
+        if browser:
+            await browser.close()
+    except Exception:
+        append_log("Error while closing browser in shutdown_server:\n")
+        append_log(traceback.format_exc())
+
+    try:
+        if pw:
+            await pw.stop()
+    except Exception:
+        append_log("Error while stopping Playwright in shutdown_server:\n")
+        append_log(traceback.format_exc())
+
+    # Small delay to let JS execute, then hard-exit
+    await asyncio.sleep(0.3)
+    os._exit(0)
 
 
+ui.button(
+    "Close App",
+    on_click=shutdown_server,
+).classes("mt-6 bg-red-600 text-white px-4 py-2 rounded")
+
+
+# Credit watermark
 ui.html("""
 <div style="
     position:fixed; bottom:8px; right:12px;
