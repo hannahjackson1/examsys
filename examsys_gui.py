@@ -41,7 +41,7 @@ def append_log(text: str):
 
 
 # ------------------------------------------------------------
-# Header styling
+# Header styling (base classes – some now unused but harmless)
 # ------------------------------------------------------------
 ui.html("""
 <style>
@@ -94,6 +94,37 @@ def absolutize(href: str, base: str = EXAMSYS_BASE) -> str:
     if href.startswith("textbox_marking"):
         return f"{base.rstrip('/')}/reports/{href}"
     return f"{base.rstrip('/')}/{href.lstrip('/')}"
+
+
+def normalize_mark(mark: str) -> str:
+    """
+    Convert marks like '½', '1½', '2½' into decimal strings ('0.5', '1.5', '2.5')
+    so Excel sees them as numeric values.
+
+    If parsing fails, return the original mark.
+    """
+    if mark is None:
+        return ""
+    mark = mark.strip()
+    if not mark:
+        return ""
+
+    # Simple half-mark handling
+    if '½' in mark:
+        # Just '½' on its own
+        if mark == '½':
+            return "0.5"
+        # e.g. '1½', '2½', '3½'
+        try:
+            base = mark.replace('½', '').strip()
+            base_val = int(base) if base else 0
+            return f"{base_val + 0.5}"
+        except ValueError:
+            # If something unexpected, just leave it as-is
+            return mark
+
+    # Otherwise, leave unchanged (e.g. '0', '1', '2', '3', '4')
+    return mark
 
 
 # ------------------------------------------------------------
@@ -180,8 +211,9 @@ async def extract_feedback(report_url: str, output_path: str, log_box):
                     sid = (await b.locator(USERNAME_SEL).get_attribute("value")) or ""
                     ans = (await b.locator(ANSWER_SEL).inner_text()).strip() \
                           if await b.locator(ANSWER_SEL).count() else ""
-                    mark = (await b.locator(MARK_SEL).inner_text()).strip() \
-                           if await b.locator(MARK_SEL).count() else ""
+                    mark_raw = (await b.locator(MARK_SEL).inner_text()).strip() \
+                               if await b.locator(MARK_SEL).count() else ""
+                    mark = normalize_mark(mark_raw)
                     com = (await b.locator(COMMENT_SEL).input_value()).strip() \
                            if await b.locator(COMMENT_SEL).count() else ""
 
@@ -410,13 +442,53 @@ async def choose_and_extract(log_box, output_input, summary_labels):
 # ------------------------------------------------------------
 # GUI Layout
 # ------------------------------------------------------------
-ui.html(
-    '''
-    <div class="header"><span class="left">🦊 FOXES: ExamSys Feedback Extractor</span></div>
-    <div class="subheader"> Feedback Output Xtractor: Examsys SAQ </div>
-    ''',
-    sanitize=False,
-)
+# FULL-WIDTH FIXED SPLIT HEADER:
+# - main bar = academic navy
+# - subheader bar = foxy orange accent, now more prominent
+ui.html("""
+<style>
+  .fullwidth-header {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    background: #001E43;              /* Navy */
+    color: white;
+    padding: 1rem 2rem;
+    font-size: 1.7rem;
+    font-weight: 600;
+    font-family: system-ui, sans-serif;
+    z-index: 9999;
+    box-sizing: border-box;
+  }
+  .fullwidth-subheader {
+    position: fixed;
+    top: 64px;                         /* sits just beneath header */
+    left: 0;
+    width: 100%;
+    background: #f57c00;               /* Foxy orange accent */
+    color: #FFF3E0;                    /* Slightly brighter soft text */
+    padding: 0.6rem 2rem;              /* a bit taller */
+    font-size: 1.2rem;                 /* bigger subtitle */
+    font-weight: 600;                  /* bolder subtitle */
+    font-family: system-ui, sans-serif;
+    z-index: 9998;
+    box-sizing: border-box;
+  }
+  body { margin: 0; }
+</style>
+
+<div class="fullwidth-header">
+  🦊 FOXES: ExamSys Feedback Extractor
+</div>
+
+<div class="fullwidth-subheader">
+  Feedback Output Xtractor: Examsys SAQ
+</div>
+""", sanitize=False)
+
+# Spacer so content does not slide under the fixed headers
+ui.html("<div style='height:45px'></div>", sanitize=False)
 
 # Step 1
 with ui.card().classes("w-full mt-4 p-4"):
@@ -454,7 +526,7 @@ with ui.card().classes("w-full mt-4 p-4"):
 # COMPACT TWO-COLUMN SUMMARY CARD (RIGHT-ALIGNED)
 # ------------------------------------------------------------
 with ui.card().classes("w-full mt-4 p-3"):
-    ui.label("Extraction Summary").classes("text-md font-semibold mb-2 text-[#334155]")
+    ui.label("Extraction Summary").classes("text-md font-semibold mb-2 text-[#7c2d12]")
 
     ui.html("""
     <style>
@@ -565,7 +637,7 @@ ui.html("""
     position:fixed; bottom:8px; right:12px;
     font-size:0.75rem; opacity:0.6; color:#4b5563;
     pointer-events:none; font-family:system-ui;">
-    Developed by Dr Hannah Jackson
+    Hannah Jackson
 </div>
 """, sanitize=False)
 
