@@ -359,10 +359,10 @@ async def choose_and_extract(log_box, output_input, summary_labels):
     CURRENT_LOG_FILE = new_log_file()
     append_log(f"=== New Extraction Session: {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
 
-    # Start playwright (browser automation), launch a visible chromium browswer,
+    # Start playwright (browser automation), launch a visible chrome browswer,
     # create a fresh context (browser session), and open a new tab
     pw = await async_playwright().start()
-    browser = await pw.chromium.launch(headless=False)
+    browser = await pw.chromium.launch(channel="chrome", headless=False)
     ctx = await browser.new_context()
     page = await ctx.new_page()
 
