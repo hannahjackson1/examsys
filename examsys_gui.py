@@ -654,6 +654,7 @@ with ui.card().classes("w-full mt-3 p-3"):
     </style>
     """, sanitize=False)
 
+    # summary labels dictionary, storing references to each field for dynamic updating later
     with ui.element("div").classes("summary-grid"):
         ui.label("Total questions:").classes("summary-label")
         summary_labels['questions'] = ui.label("–").classes("summary-value font-mono")
@@ -681,14 +682,15 @@ with ui.expansion('Extraction Log', value=False).classes("mt-3 w-full"):
     log = ui.textarea().classes("w-full h-[34rem] text-base").style("resize:none;overflow-y:scroll;")
     log.on('update:model-value', lambda _: autoscroll())
 
+# close app button (painful to make)
 
-# ------------------------------------------------------------
-# Close App button with JS tab-close + extra cleanup
-# ------------------------------------------------------------
+# define shutdown function
 async def shutdown_server():
     global pw, browser, ctx
+    # add user requested shutdown request to log
     append_log("Shutdown requested by user via Close App button.\n")
 
+    # try to close the window using javascript
     ui.run_javascript("""
         try {
             window.open('', '_self');
@@ -698,6 +700,8 @@ async def shutdown_server():
         }
     """)
 
+    # close browser session, ensuring login session for examsys closes
+    # and no background state is left hanging
     try:
         if ctx:
             await ctx.close()
@@ -705,6 +709,7 @@ async def shutdown_server():
         append_log("Error while closing context in shutdown_server:\n")
         append_log(traceback.format_exc())
 
+    # close browswer itself
     try:
         if browser:
             await browser.close()
@@ -712,6 +717,7 @@ async def shutdown_server():
         append_log("Error while closing browser in shutdown_server:\n")
         append_log(traceback.format_exc())
 
+    # close down playwright
     try:
         if pw:
             await pw.stop()
@@ -719,16 +725,18 @@ async def shutdown_server():
         append_log("Error while stopping Playwright in shutdown_server:\n")
         append_log(traceback.format_exc())
 
+    # small pause, then force exit (pause stops things falling over and allows cleanup to finish)
     await asyncio.sleep(0.3)
     os._exit(0)
 
+# create button itself in gui window
 ui.button(
     "Close App",
     on_click=shutdown_server,
 ).classes("mt-5 bg-red-600 text-white px-4 py-2 rounded")
 
 
-# Credit watermark
+# add name small at the bottom
 ui.html("""
 <div style="
     position:fixed; bottom:8px; right:12px;
@@ -738,4 +746,5 @@ ui.html("""
 </div>
 """, sanitize=False)
 
+# 3, 2, 1, go! 🚀
 ui.run(reload=False)
